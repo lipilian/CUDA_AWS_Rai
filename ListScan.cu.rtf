@@ -1,0 +1,179 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2509
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 // MP Scan\
+// Given a list (lst) of length n\
+// Output its prefix sum = \{lst[0], lst[0] + lst[1], lst[0] + lst[1] + ...\
+// +\
+// lst[n-1]\}\
+\
+#include <wb.h>\
+\
+#define BLOCK_SIZE 512 //@@ You can change this\
+#define wbCheck(stmt)                                                     \\\
+  do \{                                                                    \\\
+    cudaError_t err = stmt;                                               \\\
+    if (err != cudaSuccess) \{                                             \\\
+      wbLog(ERROR, "Failed to run stmt ", #stmt);                         \\\
+      wbLog(ERROR, "Got CUDA error ...  ", cudaGetErrorString(err));      \\\
+      return -1;                                                          \\\
+    \}                                                                     \\\
+  \} while (0)\
+\
+__global__ void storeBlockSum(float *input, int len, int totalLen) \{\
+  __shared__ float sharedPartialSum[1024];\
+  int tid = threadIdx.x;\
+  if(tid < len)\{\
+    sharedPartialSum[tid] = input[(tid + 1) * 1024 - 1];\
+  \} else \{\
+    sharedPartialSum[tid] = 0;\
+  \}\
+  __syncthreads();\
+  int stride = 1;\
+  while(2*stride <= 1024)\{\
+    if(tid >= stride)\{\
+      sharedPartialSum[tid] += sharedPartialSum[tid - stride];\
+    \}\
+    stride *= 2;\
+  \}\
+  __syncthreads();\
+  int i = 0;\
+  while(i < len && ((i+1) * 1024 + tid) < totalLen)\{\
+    input[(i+1) * 1024 + tid] += sharedPartialSum[i];\
+    i++;\
+  \}\
+\}\
+\
+__global__ void scan(float *input, float *output, int len) \{\
+  //@@ Modify the body of this function to complete the functionality of\
+  //@@ the scan on the device\
+  //@@ You may need multiple kernel calls; write your kernels before this\
+  //@@ function and call them from the host\
+  __shared__ float sharedInput[BLOCK_SIZE];\
+  int tid = threadIdx.x + blockIdx.x * blockDim.x;\
+  if(tid < len)\{\
+    sharedInput[threadIdx.x] = input[tid];\
+  \} else \{\
+    sharedInput[threadIdx.x] = 0;\
+  \}\
+  __syncthreads();\
+  int stride = 1;\
+  while(2* stride <= blockDim.x)\{\
+    if(threadIdx.x >= stride)\{\
+      sharedInput[threadIdx.x] += sharedInput[threadIdx.x - stride];\
+    \}\
+    __syncthreads();\
+    stride *= 2;\
+  \}\
+  output[tid] = sharedInput[threadIdx.x];\
+\}\
+\
+__global__ void BKscan(float *input, float *output, int len)\{\
+  __shared__ float T[2 * BLOCK_SIZE];\
+  \
+  if((blockIdx.x * 2 * BLOCK_SIZE + threadIdx.x) < len)\{\
+    T[threadIdx.x] = input[blockIdx.x * 2 * BLOCK_SIZE + threadIdx.x];\
+  \} else \{\
+    T[threadIdx.x] = 0;\
+  \}\
+  if((blockIdx.x * 2 * BLOCK_SIZE + BLOCK_SIZE + threadIdx.x) < len)\{\
+    T[BLOCK_SIZE + threadIdx.x] = input[blockIdx.x * 2 * BLOCK_SIZE + BLOCK_SIZE + threadIdx.x];\
+  \} else\{\
+    T[BLOCK_SIZE + threadIdx.x] = 0;\
+  \}\
+  __syncthreads();\
+  \
+  int stride = 1;\
+  while(stride < 2 * BLOCK_SIZE)\{\
+    int index = (threadIdx.x + 1) * stride * 2 - 1;\
+    if(index < 2 * BLOCK_SIZE && (index - stride) >= 0)\{\
+      T[index] += T[index - stride];\
+    \}\
+    stride *= 2;\
+    __syncthreads();\
+  \}\
+  stride = BLOCK_SIZE/2;\
+  while(stride > 0)\{\
+    int index = (threadIdx.x + 1) * stride * 2 - 1;\
+    if((index + stride) < 2 * BLOCK_SIZE)\{\
+      T[index + stride] += T[index];\
+    \}\
+    stride /= 2;\
+    __syncthreads();\
+  \}\
+  output[blockIdx.x * 2 * BLOCK_SIZE + threadIdx.x] = T[threadIdx.x];\
+  output[blockIdx.x * 2 * BLOCK_SIZE + BLOCK_SIZE + threadIdx.x] = T[BLOCK_SIZE + threadIdx.x];\
+\}\
+\
+int main(int argc, char **argv) \{\
+  wbArg_t args;\
+  float *hostInput;  // The input 1D list\
+  float *hostOutput; // The output list\
+  float *deviceInput;\
+  float *deviceOutput;\
+  int numElements; // number of elements in the list\
+\
+  args = wbArg_read(argc, argv);\
+\
+  wbTime_start(Generic, "Importing data and creating memory on host");\
+  hostInput = (float *)wbImport(wbArg_getInputFile(args, 0), &numElements);\
+  hostOutput = (float *)malloc(numElements * sizeof(float));\
+  wbTime_stop(Generic, "Importing data and creating memory on host");\
+\
+  wbLog(TRACE, "The number of input elements in the input is ",\
+        numElements);\
+\
+  wbTime_start(GPU, "Allocating GPU memory.");\
+  wbCheck(cudaMalloc((void **)&deviceInput, numElements * sizeof(float)));\
+  wbCheck(cudaMalloc((void **)&deviceOutput, numElements * sizeof(float)));\
+  wbTime_stop(GPU, "Allocating GPU memory.");\
+\
+  wbTime_start(GPU, "Clearing output memory.");\
+  wbCheck(cudaMemset(deviceOutput, 0, numElements * sizeof(float)));\
+  wbTime_stop(GPU, "Clearing output memory.");\
+\
+  wbTime_start(GPU, "Copying input memory to the GPU.");\
+  wbCheck(cudaMemcpy(deviceInput, hostInput, numElements * sizeof(float),\
+                     cudaMemcpyHostToDevice));\
+  wbTime_stop(GPU, "Copying input memory to the GPU.");\
+\
+  //@@ Initialize the grid and block dimensions here\
+  dim3 dimblock(BLOCK_SIZE);\
+  dim3 dimgrid(ceil((float)numElements/(2 * BLOCK_SIZE)));\
+  BKscan <<<dimgrid, dimblock>>> (deviceInput, deviceOutput, numElements);\
+  dimblock.x = 1024;\
+  dimgrid.x = 1;\
+  storeBlockSum <<<dimgrid, dimblock>>> (deviceOutput,floor((float)numElements/1024), numElements);\
+  wbTime_start(Compute, "Performing CUDA computation");\
+  //@@ Modify this to complete the functionality of the scan\
+  //@@ on the deivce\
+  \
+  cudaDeviceSynchronize();\
+  wbTime_stop(Compute, "Performing CUDA computation");\
+\
+  wbTime_start(Copy, "Copying output memory to the CPU");\
+  wbCheck(cudaMemcpy(hostOutput, deviceOutput, numElements * sizeof(float),\
+                     cudaMemcpyDeviceToHost));\
+  wbTime_stop(Copy, "Copying output memory to the CPU");\
+  \
+  wbLog(TRACE, "The number of input elements in the input is ",\
+        hostOutput[96]);\
+  wbLog(TRACE, "The number of input elements in the input is ",\
+        hostOutput[32]);\
+  \
+  wbTime_start(GPU, "Freeing GPU Memory");\
+  cudaFree(deviceInput);\
+  cudaFree(deviceOutput);\
+  wbTime_stop(GPU, "Freeing GPU Memory");\
+\
+  wbSolution(args, hostOutput, numElements);\
+\
+  free(hostInput);\
+  free(hostOutput);\
+\
+  return 0;\
+\}}

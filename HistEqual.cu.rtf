@@ -1,0 +1,186 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2509
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 // Histogram Equalization\
+\
+#include <wb.h>\
+\
+#define HISTOGRAM_LENGTH 256\
+\
+//@@ insert code here\
+// cast image from float to unsigned_char\
+__global__ void castImage(float* input, unsigned char* output, int imageWidth, int imageHeight)\{\
+  int Row = (blockIdx.y * blockDim.y + threadIdx.y);\
+  int Col = (blockIdx.x * blockDim.x + threadIdx.x);\
+  if(Row < imageHeight && Col < imageWidth)\{\
+    int idx = blockIdx.z * (imageWidth * imageHeight) + Row * imageWidth + Col;\
+    output[idx] = (unsigned char)(255 * input[idx]);\
+  \}\
+\}\
+\
+__global__ void RGBtoGray(unsigned char* input, unsigned char* output, int imageWidth, int imageHeight)\{\
+  int Row = (blockIdx.y * blockDim.y + threadIdx.y);\
+  int Col = (blockIdx.x * blockDim.x + threadIdx.x);\
+  if(Row < imageHeight && Col < imageWidth)\{\
+    int idx = Row * imageWidth + Col;\
+    unsigned char r = input[3 * idx];\
+    unsigned char g = input[3 * idx + 1];\
+    unsigned char b = input[3 * idx + 2];\
+    output[idx] = (unsigned char)(0.21*r + 0.71*g + 0.07*b);\
+  \}\
+\}\
+\
+__global__ void GraytoHist(unsigned char* input, unsigned int* output, int imageWidth, int imageHeight)\{\
+  __shared__ unsigned int histogram[HISTOGRAM_LENGTH];\
+  int tid = threadIdx.y * blockDim.x + threadIdx.x;\
+  if(tid < HISTOGRAM_LENGTH)\{\
+    histogram[tid] = 0;\
+  \}\
+  __syncthreads();\
+  int Row = (blockIdx.y * blockDim.y + threadIdx.y);\
+  int Col = (blockIdx.x * blockDim.x + threadIdx.x);\
+  if(Row < imageHeight && Col < imageWidth)\{\
+    int idx = Row * imageWidth + Col;\
+    atomicAdd(&(histogram[input[idx]]), 1);\
+  \}\
+  __syncthreads();\
+  if(tid < HISTOGRAM_LENGTH)\{\
+    atomicAdd(&(output[tid]), histogram[tid]);\
+  \}\
+\}\
+\
+__global__ void HisttoCDF(unsigned int* input, float* output, int imageWidth, int imageHeight)\{\
+  __shared__ unsigned int cdf[HISTOGRAM_LENGTH];\
+  int tid = threadIdx.x;\
+  if(tid < HISTOGRAM_LENGTH)\{\
+    cdf[tid] = input[tid];\
+  \}\
+  __syncthreads();\
+  int stride = 1;\
+  while(2 * stride <= HISTOGRAM_LENGTH)\{\
+    if(tid >= stride)\{\
+      cdf[tid] += cdf[tid - stride];\
+    \}\
+    __syncthreads();\
+    stride *= 2;\
+  \}\
+  if(tid < HISTOGRAM_LENGTH)\{\
+    output[tid] = cdf[tid] / ((float) (imageWidth * imageHeight));\
+  \}\
+\}\
+\
+__global__ void equalize(unsigned char* input, float* cdf, int imageWidth, int imageHeight)\{\
+  int Row = (blockIdx.y * blockDim.y + threadIdx.y);\
+  int Col = (blockIdx.x * blockDim.x + threadIdx.x);\
+  if(Row < imageHeight && Col < imageWidth)\{\
+    int idx = blockIdx.z * (imageWidth * imageHeight) + Row * imageWidth + Col;\
+    unsigned char temp = input[idx];\
+    float equalize = 255 * (cdf[temp] - cdf[0])/(1.0 - cdf[0]);\
+    float clamp = min(max(equalize, 0.0), 255.0);\
+    input[idx] = (unsigned char)(clamp);\
+  \}\
+\}\
+\
+__global__ void UnChartoFloat(unsigned char* input, float* output, int imageWidth, int imageHeight)\{\
+  int Row = (blockIdx.y * blockDim.y + threadIdx.y);\
+  int Col = (blockIdx.x * blockDim.x + threadIdx.x);\
+  if(Row < imageHeight && Col < imageWidth)\{\
+    int idx = blockIdx.z * (imageWidth * imageHeight) + Row * imageWidth + Col;\
+    output[idx] = (float) (input[idx] / 255.0);\
+  \}\
+\}\
+\
+int main(int argc, char **argv) \{\
+  wbArg_t args;\
+  int imageWidth;\
+  int imageHeight;\
+  int imageChannels;\
+  wbImage_t inputImage;\
+  wbImage_t outputImage;\
+  float *hostInputImageData;\
+  float *hostOutputImageData;\
+  const char *inputImageFile;\
+  \
+  //@@ Insert more code here\
+  float *devicefloat;\
+  unsigned char *deviceUChar;\
+  unsigned char *deviceUCharGray;\
+  unsigned int *deviceHist;\
+  float *deviceCDF;\
+\
+  args = wbArg_read(argc, argv); /* parse the input arguments */\
+\
+  inputImageFile = wbArg_getInputFile(args, 0);\
+\
+  wbTime_start(Generic, "Importing data and creating memory on host");\
+  inputImage = wbImport(inputImageFile);\
+  imageWidth = wbImage_getWidth(inputImage);\
+  imageHeight = wbImage_getHeight(inputImage);\
+  imageChannels = wbImage_getChannels(inputImage);\
+  outputImage = wbImage_new(imageWidth, imageHeight, imageChannels);\
+  hostInputImageData  = wbImage_getData(inputImage);\
+  hostOutputImageData = wbImage_getData(outputImage);\
+  wbTime_stop(Generic, "Importing data and creating memory on host");\
+\
+  //@@ insert code here\
+    \
+  // GPU memory allocate\
+  cudaMalloc((void **) &devicefloat, imageWidth * imageHeight * imageChannels * sizeof(float));\
+  cudaMalloc((void **) &deviceUChar, imageWidth * imageHeight * imageChannels * sizeof(unsigned char));\
+  cudaMalloc((void **) &deviceUCharGray, imageWidth * imageHeight  * sizeof(unsigned char));\
+  cudaMalloc((void **) &deviceHist, HISTOGRAM_LENGTH * sizeof(unsigned int));\
+  cudaMemset(deviceHist, 0, HISTOGRAM_LENGTH * sizeof(unsigned int));\
+  cudaMalloc((void **) &deviceCDF, HISTOGRAM_LENGTH * sizeof(float));\
+  \
+  \
+  // GPU memory transfer\
+  cudaMemcpy(devicefloat, hostInputImageData, imageWidth * imageHeight * imageChannels * sizeof(float), cudaMemcpyHostToDevice);\
+  \
+  // cast Image to unsigned char\
+  dim3 Block(32,32,1);\
+  dim3 Grid(ceil(imageWidth/(float)(Block.x)),ceil(imageHeight/(float)(Block.y)), imageChannels);\
+  castImage<<<Grid, Block>>>(devicefloat,deviceUChar,imageWidth,imageHeight);\
+  cudaDeviceSynchronize();\
+  \
+  // unsigned char to gray\
+  Grid.z = 1;\
+  RGBtoGray<<<Grid, Block>>>(deviceUChar, deviceUCharGray, imageWidth, imageHeight);\
+  cudaDeviceSynchronize();\
+  \
+  \
+  // gray to histogram\
+  GraytoHist<<<Grid, Block>>>(deviceUCharGray, deviceHist, imageWidth, imageHeight);\
+  cudaDeviceSynchronize();\
+  \
+  // histogram to CFD\
+  Grid = dim3(1,1,1);\
+  Block = dim3(HISTOGRAM_LENGTH,1,1);\
+  HisttoCDF<<<Grid, Block>>>(deviceHist, deviceCDF, imageWidth, imageHeight);\
+  cudaDeviceSynchronize();\
+  \
+  //equal\
+  Block = dim3(32,32,1);\
+  Grid = dim3(ceil(imageWidth/(float)(Block.x)),ceil(imageHeight/(float)(Block.y)), imageChannels);\
+  equalize<<<Grid, Block>>>(deviceUChar, deviceCDF, imageWidth, imageHeight);\
+  cudaDeviceSynchronize();\
+  \
+  // back to float\
+  UnChartoFloat<<<Grid, Block>>>(deviceUChar, devicefloat, imageWidth, imageHeight);\
+  cudaDeviceSynchronize();\
+  \
+  cudaMemcpy(hostOutputImageData, devicefloat, imageWidth * imageHeight * imageChannels * sizeof(float), cudaMemcpyDeviceToHost);\
+  wbSolution(args, outputImage);\
+\
+  //@@ insert code here\
+  cudaFree(devicefloat);\
+  cudaFree(deviceUChar);\
+  cudaFree(deviceUCharGray);\
+  cudaFree(deviceHist);\
+  cudaFree(deviceCDF);\
+\
+  return 0;\
+\}}

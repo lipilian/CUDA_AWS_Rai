@@ -1,0 +1,89 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2509
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 // MP 1\
+#include <wb.h>\
+\
+__global__ void vecAdd(float *in1, float *in2, float *out, int len) \{\
+  //@@ Insert code to implement vector addition here\
+  int gid = blockIdx.x * blockDim.x + threadIdx.x;\
+  if (gid < len)\{\
+    out[gid] = in1[gid] + in2[gid];\
+  \}\
+\}\
+\
+int main(int argc, char **argv) \{\
+  wbArg_t args;\
+  int inputLength;\
+  float *hostInput1;\
+  float *hostInput2;\
+  float *hostOutput;\
+  float *deviceInput1;\
+  float *deviceInput2;\
+  float *deviceOutput;\
+\
+  args = wbArg_read(argc, argv);\
+\
+  wbTime_start(Generic, "Importing data and creating memory on host");\
+  hostInput1 =\
+      (float *)wbImport(wbArg_getInputFile(args, 0), &inputLength);\
+  hostInput2 =\
+      (float *)wbImport(wbArg_getInputFile(args, 1), &inputLength);\
+  hostOutput = (float *)malloc(inputLength * sizeof(float));\
+  wbTime_stop(Generic, "Importing data and creating memory on host");\
+\
+  wbLog(TRACE, "The input length is ", inputLength);\
+\
+  wbTime_start(GPU, "Allocating GPU memory.");\
+  //@@ Allocate GPU memory here\
+  size_t NO_BYTES = inputLength * sizeof(float);\
+  cudaMalloc((void **) &deviceInput1, NO_BYTES);\
+  cudaMalloc((void **) &deviceInput2, NO_BYTES);\
+  cudaMalloc((void **) &deviceOutput, NO_BYTES);\
+  wbTime_stop(GPU, "Allocating GPU memory.");\
+\
+  wbTime_start(GPU, "Copying input memory to the GPU.");\
+  cudaMemcpy(deviceInput1, hostInput1, NO_BYTES, cudaMemcpyHostToDevice);\
+  cudaMemcpy(deviceInput2, hostInput2, NO_BYTES, cudaMemcpyHostToDevice);\
+  cudaMemcpy(deviceOutput, hostOutput, NO_BYTES, cudaMemcpyHostToDevice);\
+  wbTime_stop(GPU, "Copying input memory to the GPU.");\
+\
+  //@@ Initialize the grid and block dimensions here\
+  int block_size = 128;\
+  dim3 block(block_size);\
+  dim3 grid(inputLength/block.x + 1);\
+  \
+  wbTime_start(Compute, "Performing CUDA computation");\
+  //@@ Launch the GPU Kernel here\
+  vecAdd<<<grid, block>>>(deviceInput1, deviceInput2, deviceOutput, inputLength);\
+  \
+  \
+  cudaDeviceSynchronize();\
+  wbTime_stop(Compute, "Performing CUDA computation");\
+\
+  wbTime_start(Copy, "Copying output memory to the CPU");\
+  //@@ Copy the GPU memory back to the CPU here\
+  cudaMemcpy(hostOutput, deviceOutput, NO_BYTES, cudaMemcpyDeviceToHost);\
+  wbTime_stop(Copy, "Copying output memory to the CPU");\
+\
+  wbTime_start(GPU, "Freeing GPU Memory");\
+  //@@ Free the GPU memory here\
+  cudaFree(deviceInput1);\
+  cudaFree(deviceInput2);\
+  cudaFree(deviceOutput);\
+\
+  wbTime_stop(GPU, "Freeing GPU Memory");\
+\
+  wbSolution(args, hostOutput, inputLength);\
+\
+  free(hostInput1);\
+  free(hostInput2);\
+  free(hostOutput);\
+\
+  return 0;\
+\}\
+}
